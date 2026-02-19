@@ -37,8 +37,9 @@ def animate_mocap(asf_path, amc_path):
                 p1 = joint.parent.coordinate
                 p2 = joint.coordinate
                 x_data = [p1[0, 0], p2[0, 0]]
-                y_data = [p1[1, 0], p2[1, 0]]
-                z_data = [p1[2, 0], p2[2, 0]]
+                ## Swap y and z here to match typical 3D coordinate in IsaacLab (Z-up)
+                z_data = [p1[1, 0], p2[1, 0]]
+                y_data = [p1[2, 0], p2[2, 0]]
                 
                 all_x.extend(x_data)
                 all_y.extend(y_data)
@@ -49,16 +50,19 @@ def animate_mocap(asf_path, amc_path):
         # Draw joints as points
         for joint in joints.values():
             pos = joint.coordinate
-            ax.scatter([pos[0, 0]], [pos[1, 0]], [pos[2, 0]], c='blue', s=50)
-            all_x.append(pos[0, 0])
-            all_y.append(pos[1, 0])
-            all_z.append(pos[2, 0])
+            ## Swap y and z here to match typical 3D coordinate in IsaacLab (Z-up)
+            x_points, y_points, z_points = pos[0, 0], pos[2, 0], pos[1, 0]  # Swap y and z for plotting
+            ax.scatter([x_points], [y_points], [z_points], c='blue', s=50)
+            all_x.append(x_points)
+            all_y.append(y_points)
+            all_z.append(z_points)
         
         # Update trajectory
         pos = joints['root'].coordinate
         root_x.append(pos[0, 0])
-        root_y.append(pos[1, 0])
-        root_z.append(pos[2, 0])
+        ## Swap y and z here to match typical 3D coordinate in IsaacLab (Z-up)
+        root_y.append(pos[2, 0])
+        root_z.append(pos[1, 0])
         
         if len(root_x) > 1:
             ax.plot(root_x, root_y, root_z, color='red', alpha=0.5, linewidth=1)
@@ -76,9 +80,10 @@ def animate_mocap(asf_path, amc_path):
         ax.set_title(f'Frame {frame_idx + 1}/{len(motions)}')
 
     # Start animation
-    ani = FuncAnimation(fig, update, frames=len(motions), interval=50, repeat=True)
+    ani = FuncAnimation(fig, update, frames=len(motions), interval=5, repeat=True)
     
     plt.show()
 
 # Run it
 animate_mocap('subjects/01/01.asf', 'subjects/01/01_05.amc')
+#animate_mocap('subjects/103/103.asf', 'subjects/103/103_01.amc')
