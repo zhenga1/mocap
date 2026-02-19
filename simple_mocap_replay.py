@@ -77,6 +77,7 @@ def animate_mocap(asf_path, amc_path):
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
         ax.set_zlabel('Z')
+        ax.set_zlim3d([0, 50]) # Set a reasonable Z limit for better visualization
         ax.set_title(f'Frame {frame_idx + 1}/{len(motions)}')
 
     # Start animation
