@@ -1,42 +1,84 @@
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-import amc_parser as amc # Assuming you have the parser file in your folder
+from matplotlib.animation import FuncAnimation
+import amc_parser as amc
+import numpy as np
 
-def visualize_flip(asf_path, amc_path):
+def animate_mocap(asf_path, amc_path):
     joints = amc.parse_asf(asf_path)
     motions = amc.parse_amc(amc_path)
     
+    #import pdb; pdb.set_trace()
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     
-    # Trajectory storage
+    # Initialize line objects - create empty lines for each bone
+    lines = {}
+    for name, joint in joints.items():
+        if joint.parent:
+            lines[name], = ax.plot([], [], [], 'b-', linewidth=2)
+    
+    traj_line, = ax.plot([], [], [], color='red', alpha=0.5, linewidth=1)
     root_x, root_y, root_z = [], [], []
 
-    for frame in motions:
-        ax.cla() # Clear for animation
+    def update(frame_idx):
+        # Clear previous frame
+        ax.clear()
         
-        # Apply the motion to the skeleton
+        frame = motions[frame_idx]
         joints['root'].set_motion(frame)
         
-        # Track the 'root' (pelvis) trajectory
-        # This is how you identify a real jump vs a floor flip
-        root_pos = joints['root'].coordinate
-        root_x.append(root_pos[0])
-        root_y.append(root_pos[1])
-        root_z.append(root_pos[2])
+        # Collect all coordinates for auto-scaling
+        all_x, all_y, all_z = [], [], []
+        
+        # Draw bones
+        for name, joint in joints.items():
+            if joint.parent:
+                p1 = joint.parent.coordinate
+                p2 = joint.coordinate
+                x_data = [p1[0, 0], p2[0, 0]]
+                y_data = [p1[1, 0], p2[1, 0]]
+                z_data = [p1[2, 0], p2[2, 0]]
+                
+                all_x.extend(x_data)
+                all_y.extend(y_data)
+                all_z.extend(z_data)
+                
+                ax.plot(x_data, y_data, z_data, 'b-', linewidth=2)
+        
+        # Draw joints as points
+        for joint in joints.values():
+            pos = joint.coordinate
+            ax.scatter([pos[0, 0]], [pos[1, 0]], [pos[2, 0]], c='blue', s=50)
+            all_x.append(pos[0, 0])
+            all_y.append(pos[1, 0])
+            all_z.append(pos[2, 0])
+        
+        # Update trajectory
+        pos = joints['root'].coordinate
+        root_x.append(pos[0, 0])
+        root_y.append(pos[1, 0])
+        root_z.append(pos[2, 0])
+        
+        if len(root_x) > 1:
+            ax.plot(root_x, root_y, root_z, color='red', alpha=0.5, linewidth=1)
+        
+        # Auto-scale axes with some padding
+        if all_x:
+            margin = 20
+            ax.set_xlim3d([min(all_x) - margin, max(all_x) + margin])
+            ax.set_ylim3d([min(all_y) - margin, max(all_y) + margin])
+            ax.set_zlim3d([min(all_z) - margin, max(all_z) + margin])
+        
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_title(f'Frame {frame_idx + 1}/{len(motions)}')
 
-        # Draw the skeleton
-        joints['root'].draw()
-        
-        # Draw the trajectory so far
-        ax.plot(root_x, root_y, root_z, color='red', alpha=0.5)
-        
-        # Fix the view so it doesn't jump around
-        ax.set_xlim3d([-50, 50])
-        ax.set_ylim3d([-50, 50])
-        ax.set_zlim3d([0, 100])
-        
-        plt.pause(0.001) # High-speed replay
+    # Start animation
+    ani = FuncAnimation(fig, update, frames=len(motions), interval=50, repeat=True)
+    
+    plt.show()
 
-# Example: Run it on a flip folder
-visualize_flip('subjects/103/103.asf', 'subjects/103/103_01.amc')
+# Run it
+animate_mocap('subjects/01/01.asf', 'subjects/01/01_05.amc')
