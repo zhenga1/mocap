@@ -5,8 +5,8 @@ import pink
 import os
 from pink.tasks import FrameTask
 ## SETUP loop
-amc_path = 'subjects/01/01_05.amc'
-asf_path = 'subjects/01/01.asf'
+amc_path = '../subjects/01/01_05.amc'
+asf_path = '../subjects/01/01.asf'
 urdf_path = "C:\\Users\\aaron\\IsaacSim_4.0.0\\Berkeley-Humanoid-Lite\\source\\berkeley_humanoid_lite_assets\\data\\robots\\berkeley_humanoid\\berkeley_humanoid_lite\\urdf\\berkeley_humanoid_lite.urdf"
 
 motions = amc.parse_amc(amc_path)
