@@ -1,3 +1,12 @@
+import os
+import sys
+
+_r = os.path.dirname(os.path.abspath(__file__))
+while _r and not os.path.isfile(os.path.join(_r, "amc_parser.py")):
+    _r = os.path.dirname(_r)
+if _r and _r not in sys.path:
+    sys.path.insert(0, _r)
+
 import amc_parser as amc
 import pinocchio as pin
 import numpy as np

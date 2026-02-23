@@ -21,11 +21,19 @@ Correctness:
   - Batch: same robot and tasks reused; configuration is reset per motion via
     configuration.q = robot.q0 at the start of retarget_motion.
 """
+import os
+import sys
+
+_r = os.path.dirname(os.path.abspath(__file__))
+while _r and not os.path.isfile(os.path.join(_r, "amc_parser.py")):
+    _r = os.path.dirname(_r)
+if _r and _r not in sys.path:
+    sys.path.insert(0, _r)
+
 import amc_parser as amc
 import pinocchio as pin
 import numpy as np
 import pink
-import os
 from get_motion_registry import get_motion_registry
 from pink.tasks import FrameTask
 
@@ -37,8 +45,8 @@ URDF_PATH = os.path.join(
 if not os.path.isfile(URDF_PATH):
     URDF_PATH = "C:\\Users\\aaron\\IsaacSim_4.0.0\\Berkeley-Humanoid-Lite\\source\\berkeley_humanoid_lite_assets\\data\\robots\\berkeley_humanoid\\berkeley_humanoid_lite\\urdf\\berkeley_humanoid_lite.urdf"
 
-SUBJECTS_DIR = "subjects"
-OUTPUT_DIR = "retargeted"
+SUBJECTS_DIR = "../subjects"
+OUTPUT_DIR = "../retargeted_only_pelvis_left_right_foot"
 SCALE = 0.45
 DT = 0.02
 

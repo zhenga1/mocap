@@ -1,7 +1,16 @@
+import os
+import sys
+
+_r = os.path.dirname(os.path.abspath(__file__))
+while _r and not os.path.isfile(os.path.join(_r, "amc_parser.py")):
+    _r = os.path.dirname(_r)
+if _r and _r not in sys.path:
+    sys.path.insert(0, _r)
+
+import amc_parser as amc
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation
-import amc_parser as amc
 import numpy as np
 
 def animate_mocap(asf_path, amc_path):
