@@ -144,52 +144,121 @@ def animate_retargeted(npy_paths, interval=50):
         for row in range(q.shape[0]):
             frame_to_file_and_row.append((fi, row))
 
+
+    lines = []
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection="3d")
+    scatter = ax.scatter([], [], [], c="blue", s=25, alpha=0.9, picker=True)
+    scatter._frame_ids = []
     pelvis_traj_x, pelvis_traj_y, pelvis_traj_z = [], [], []
+    # Annotation shown when clicking on a vertex
+    annotation = ax.text2D(
+        0.02,
+        0.98,
+        "",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        color="black",
+    )
 
     def update(frame_idx):
-        ax.clear()
         if frame_idx == 0:
             pelvis_traj_x.clear()
             pelvis_traj_y.clear()
             pelvis_traj_z.clear()
+
         fi, row = frame_to_file_and_row[frame_idx]
         q = q_trajectories[fi][row]
         positions = get_all_frame_positions(robot, q)
 
-        all_x, all_y, all_z = [], [], []
+        # Update scatter data
+        frame_ids = sorted(positions.keys())
+        xs = [positions[i][0] for i in frame_ids]
+        ys = [positions[i][1] for i in frame_ids]
+        zs = [positions[i][2] for i in frame_ids]
+
+        scatter._offsets3d = (xs, ys, zs)
+        scatter._frame_ids = frame_ids
+
+        # We'll use these to set axis limits so the figure doesn't look flattened.
+        all_x = xs.copy()
+        all_y = ys.copy()
+        all_z = zs.copy()
+
+        # Remove old lines
+        for line in lines:
+            line.remove()
+        lines.clear()
+
+        # Draw skeleton edges
         for (child, parent) in skeleton_edges:
             if child not in positions or parent not in positions:
                 continue
             pc, pp = positions[child], positions[parent]
-            ax.plot([pc[0], pp[0]], [pc[1], pp[1]], [pc[2], pp[2]], "b-", linewidth=1.5)
+            line, = ax.plot(
+                [pc[0], pp[0]],
+                [pc[1], pp[1]],
+                [pc[2], pp[2]],
+                "b-",
+                linewidth=1.5,
+            )
+            lines.append(line)
             all_x.extend([pc[0], pp[0]])
             all_y.extend([pc[1], pp[1]])
             all_z.extend([pc[2], pp[2]])
-        xs = [positions[i][0] for i in positions]
-        ys = [positions[i][1] for i in positions]
-        zs = [positions[i][2] for i in positions]
-        ax.scatter(xs, ys, zs, c="blue", s=25, alpha=0.9)
 
+        # Pelvis trajectory
         if base_fid >= 0 and base_fid in positions:
             p = positions[base_fid]
             pelvis_traj_x.append(p[0])
             pelvis_traj_y.append(p[1])
             pelvis_traj_z.append(p[2])
             if len(pelvis_traj_x) > 1:
-                ax.plot(pelvis_traj_x, pelvis_traj_y, pelvis_traj_z, color="red", alpha=0.6, linewidth=1)
+                traj_line, = ax.plot(
+                    pelvis_traj_x,
+                    pelvis_traj_y,
+                    pelvis_traj_z,
+                    color="red",
+                    alpha=0.6,
+                    linewidth=1,
+                )
+                lines.append(traj_line)
 
+        # Axis labels and dynamic limits
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
         if all_x:
             margin = 0.1
             ax.set_xlim3d(min(all_x) - margin, max(all_x) + margin)
             ax.set_ylim3d(min(all_y) - margin, max(all_y) + margin)
             ax.set_zlim3d(max(0, min(all_z) - margin), max(all_z) + margin)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_zlabel("Z")
+
+        # Title with current frame index (like a simple frame slider)
         file_name = os.path.basename(npy_paths[fi])
         ax.set_title(f"Full-body retargeted replay: {file_name}  Frame {frame_idx + 1}/{total_frames}")
+
+    def on_pick(event):
+        """Display the Pinocchio frame name when the user clicks a vertex."""
+        artist = event.artist
+        # Only handle our main scatter plot
+        if not hasattr(artist, "_frame_ids"):
+            return
+        ind = getattr(event, "ind", None)
+        if ind is None or len(ind) == 0:
+            return
+        idx = ind[0]
+        frame_ids = artist._frame_ids  # type: ignore[attr-defined]
+        if idx < 0 or idx >= len(frame_ids):
+            return
+        frame_id = frame_ids[idx]
+        frame_name = model.frames[frame_id].name
+        annotation.set_text(f"Frame {frame_id}: {frame_name}")
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("pick_event", on_pick)
 
     ani = FuncAnimation(fig, update, frames=total_frames, interval=interval, repeat=True)
     plt.show()

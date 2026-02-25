@@ -49,10 +49,24 @@ POSITION_COST = 1.0
 ORIENTATION_COST = 0.1
 
 
-def _to_robot_pos(coordinate):
-    """Human [3,1] -> robot frame: (x, y, z) -> (x, z, y) and scale."""
-    x, y, z = coordinate[0, 0], coordinate[1, 0], coordinate[2, 0]
-    return np.array([x, z, y], dtype=float) * SCALE
+def _to_robot_pos_relative(human_coordinate, init_root):
+    """
+    Human [3,1] -> robot frame with:
+      - coordinates made relative to the initial pelvis/root position
+      - CMU Y-up -> robot Z-up axis swap
+      - global scale + small vertical offset for better stance.
+    This mirrors the logic in left_right_foot_pelvis.get_scaled_target so
+    both retargeters use a consistent world mapping.
+    """
+    rel = human_coordinate - init_root  # 3x1
+    dx, dy, dz = rel[0, 0], rel[1, 0], rel[2, 0]
+
+    # Map CMU (x, y, z) (Y-up) -> robot (x, y, z) (Z-up)
+    x_robot = dx * SCALE
+    y_robot = dz * SCALE
+    z_robot = dy * SCALE
+
+    return np.array([x_robot, y_robot, z_robot], dtype=float)
 
 
 def build_tasks_for_skeleton(robot, joints_dict, mapping_list):
@@ -82,13 +96,22 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
     """Retarget one AMC with one ASF using full-body tasks; returns (T, nq)."""
     joints = amc.parse_asf(asf_path)
     motions = amc.parse_amc(amc_path)
+    if not motions:
+        return np.zeros((0, robot.model.nq))
+
     configuration.q = robot.q0.copy()
     retargeted = []
+
+    # Use the pelvis/root position from the first frame as the reference for all
+    # world positions, so both human and robot move in a comparable frame.
+    joints["root"].set_motion(motions[0])
+    init_root = joints["root"].coordinate.copy()
+
     for frame in motions:
         joints["root"].set_motion(frame)
         for task, cmu_name in zip(tasks, task_cmu_names):
             pos = joints[cmu_name].coordinate
-            task.set_target(pin.SE3(np.eye(3), _to_robot_pos(pos)))
+            task.set_target(pin.SE3(np.eye(3), _to_robot_pos_relative(pos, init_root)))
         velocity = pink.solve_ik(configuration, tasks, dt=DT, solver="quadprog")
         configuration.integrate_inplace(velocity, DT)
         retargeted.append(configuration.q.copy())
