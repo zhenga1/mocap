@@ -26,20 +26,56 @@ from matplotlib.animation import FuncAnimation
 import pinocchio as pin
 
 try:
+    # Prefer the full-body retargeting config (URDF path + full-body output dir)
     from scripts.retargeting.full_body import URDF_PATH, OUTPUT_DIR
 except ImportError:
     try:
         from retargeting import URDF_PATH, OUTPUT_DIR
-        # Override to full-body output if root retargeting uses a different dir
-        OUTPUT_DIR = os.path.join(_r, "retargeted_only_pelvis_left_right_foot")
+        # When importing from the simpler retargeting script, override the output
+        # directory so this replay looks at the full-body results by default.
+        OUTPUT_DIR = os.path.join(_r, "retargeted_full_body")
     except ImportError:
+        # Fallback: explicit URDF path and default full-body output directory.
         URDF_PATH = os.path.join(
             os.environ.get("BERKELEY_URDF", ""),
             "C:\\Users\\aaron\\IsaacSim_4.0.0\\Berkeley-Humanoid-Lite\\source\\berkeley_humanoid_lite_assets\\data\\robots\\berkeley_humanoid\\berkeley_humanoid_lite\\urdf\\berkeley_humanoid_lite.urdf"
         )
         if not os.path.isfile(URDF_PATH):
             URDF_PATH = "C:\\Users\\aaron\\IsaacSim_4.0.0\\Berkeley-Humanoid-Lite\\source\\berkeley_humanoid_lite_assets\\data\\robots\\berkeley_humanoid\\berkeley_humanoid_lite\\urdf\\berkeley_humanoid_lite.urdf"
-        OUTPUT_DIR = os.path.join(_r, "retargeted_only_pelvis_left_right_foot")
+        OUTPUT_DIR = os.path.join(_r, "retargeted_full_body")
+
+
+# High-level skeleton frames and edges to visualize a clean humanoid stick figure.
+SKELETON_EDGES_BY_NAME = [
+    # Left leg
+    ("base", "leg_left_hip_roll"),
+    ("leg_left_hip_roll", "leg_left_hip_yaw"),
+    ("leg_left_hip_yaw", "leg_left_hip_pitch"),
+    ("leg_left_hip_pitch", "leg_left_knee_pitch"),
+    ("leg_left_knee_pitch", "leg_left_ankle_pitch"),
+    ("leg_left_ankle_pitch", "leg_left_ankle_roll"),
+    # Right leg
+    ("base", "leg_right_hip_roll"),
+    ("leg_right_hip_roll", "leg_right_hip_yaw"),
+    ("leg_right_hip_yaw", "leg_right_hip_pitch"),
+    ("leg_right_hip_pitch", "leg_right_knee_pitch"),
+    ("leg_right_knee_pitch", "leg_right_ankle_pitch"),
+    ("leg_right_ankle_pitch", "leg_right_ankle_roll"),
+    # Left arm
+    ("base", "arm_left_shoulder_pitch"),
+    ("arm_left_shoulder_pitch", "arm_left_shoulder_roll"),
+    ("arm_left_shoulder_roll", "arm_left_shoulder_yaw"),
+    ("arm_left_shoulder_yaw", "arm_left_elbow_pitch"),
+    ("arm_left_elbow_pitch", "arm_left_elbow_roll"),
+    ("arm_left_elbow_roll", "arm_left_hand_link"),
+    # Right arm
+    ("base", "arm_right_shoulder_pitch"),
+    ("arm_right_shoulder_pitch", "arm_right_shoulder_roll"),
+    ("arm_right_shoulder_roll", "arm_right_shoulder_yaw"),
+    ("arm_right_shoulder_yaw", "arm_right_elbow_pitch"),
+    ("arm_right_elbow_pitch", "arm_right_elbow_roll"),
+    ("arm_right_elbow_roll", "arm_right_hand_link"),
+]
 
 
 def load_robot():
@@ -52,15 +88,21 @@ def load_robot():
 
 
 def build_skeleton_edges(model):
-    """Return list of (child_frame_id, parent_frame_id) for all frames with a non-world parent."""
+    """
+    Build a clean humanoid stick-figure by connecting a curated set of
+    high-level frames (hips, knees, ankles, shoulders, elbows, hands).
+
+    Returns: list of (child_frame_id, parent_frame_id).
+    """
+    name_to_id = {}
+    for name in {n for edge in SKELETON_EDGES_BY_NAME for n in edge}:
+        if model.existFrame(name):
+            name_to_id[name] = model.getFrameId(name)
+
     edges = []
-    for i in range(1, len(model.frames)):
-        frame = model.frames[i]
-        parent = getattr(frame, "parentFrame", getattr(frame, "previousFrame", -1))
-        if parent < 0 and hasattr(frame, "parent"):
-            parent = frame.parent  # some bindings use .parent for parent frame
-        if parent >= 0:
-            edges.append((i, parent))
+    for child_name, parent_name in SKELETON_EDGES_BY_NAME:
+        if child_name in name_to_id and parent_name in name_to_id:
+            edges.append((name_to_id[child_name], name_to_id[parent_name]))
     return edges
 
 
