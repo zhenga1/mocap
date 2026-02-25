@@ -34,7 +34,7 @@ except ImportError:
     )
     if not os.path.isfile(URDF_PATH):
         URDF_PATH = "C:\\Users\\aaron\\IsaacSim_4.0.0\\Berkeley-Humanoid-Lite\\source\\berkeley_humanoid_lite_assets\\data\\robots\\berkeley_humanoid\\berkeley_humanoid_lite\\urdf\\berkeley_humanoid_lite.urdf"
-    OUTPUT_DIR = "../retargeted_only_pelvis_left_right_foot"
+    OUTPUT_DIR = "../../retargeted_only_pelvis_left_right_foot"
 
 
 def load_robot():
@@ -97,12 +97,24 @@ def animate_retargeted(npy_paths, interval=50):
         for row in range(q.shape[0]):
             frame_to_file_and_row.append((fi, row))
 
+    lines = []
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection="3d")
     pelvis_traj_x, pelvis_traj_y, pelvis_traj_z = [], [], []
+    annotation = ax.text2D(
+        0.02,
+        0.98,
+        "",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        color="black",
+    )
+    scatter = ax.scatter([], [], [], c="blue", s=25, alpha=0.9, picker=True)
+    scatter._frame_ids = []
 
     def update(frame_idx):
-        ax.clear()
         if frame_idx == 0:
             pelvis_traj_x.clear()
             pelvis_traj_y.clear()
@@ -110,20 +122,31 @@ def animate_retargeted(npy_paths, interval=50):
         fi, row = frame_to_file_and_row[frame_idx]
         q = q_trajectories[fi][row]
         positions = get_all_frame_positions(robot, q)
+        xs = [positions[i][0] for i in positions]
+        ys = [positions[i][1] for i in positions]
+        zs = [positions[i][2] for i in positions]
 
-        all_x, all_y, all_z = [], [], []
+        all_x, all_y, all_z = xs.copy(), ys.copy(), zs.copy() # set axis limits??
+
+        # Remove old lines
+        for line in lines:
+            line.remove()
+        lines.clear()
+
         for (child, parent) in skeleton_edges:
             if child not in positions or parent not in positions:
                 continue
             pc, pp = positions[child], positions[parent]
-            ax.plot([pc[0], pp[0]], [pc[1], pp[1]], [pc[2], pp[2]], "b-", linewidth=1.5)
+            line, = ax.plot([pc[0], pp[0]], [pc[1], pp[1]], [pc[2], pp[2]], "b-", linewidth=1.5)
+            lines.append(line)
             all_x.extend([pc[0], pp[0]])
             all_y.extend([pc[1], pp[1]])
             all_z.extend([pc[2], pp[2]])
-        xs = [positions[i][0] for i in positions]
-        ys = [positions[i][1] for i in positions]
-        zs = [positions[i][2] for i in positions]
-        ax.scatter(xs, ys, zs, c="blue", s=25, alpha=0.9)
+        
+        # Update scatter data with the _offsets3d and _frame_ids attributes, which is the points and the numbered instance number
+        frame_ids = sorted(positions.keys())
+        scatter._offsets3d = (xs, ys, zs)
+        scatter._frame_ids = frame_ids
 
         if base_fid >= 0 and base_fid in positions:
             p = positions[base_fid]
@@ -131,7 +154,8 @@ def animate_retargeted(npy_paths, interval=50):
             pelvis_traj_y.append(p[1])
             pelvis_traj_z.append(p[2])
             if len(pelvis_traj_x) > 1:
-                ax.plot(pelvis_traj_x, pelvis_traj_y, pelvis_traj_z, color="red", alpha=0.6, linewidth=1)
+                traj_line, = ax.plot(pelvis_traj_x, pelvis_traj_y, pelvis_traj_z, color="red", alpha=0.6, linewidth=1)
+                lines.append(traj_line)
 
         if all_x:
             margin = 0.1
@@ -144,6 +168,25 @@ def animate_retargeted(npy_paths, interval=50):
         file_name = os.path.basename(npy_paths[fi])
         ax.set_title(f"Retargeted replay: {file_name}  Frame {frame_idx + 1}/{total_frames}")
 
+    def on_pick(event):
+        """Display the Pinocchio frame name when the user clicks a vertex."""
+        artist = event.artist
+        # Only handle our main scatter plot
+        if not hasattr(artist, "_frame_ids"):
+            return
+        ind = getattr(event, "ind", None)
+        if ind is None or len(ind) == 0:
+            return
+        idx = ind[0]
+        frame_ids = artist._frame_ids  # type: ignore[attr-defined]
+        if idx < 0 or idx >= len(frame_ids):
+            return
+        frame_id = frame_ids[idx]
+        frame_name = model.frames[frame_id].name
+        annotation.set_text(f"Frame {frame_id}: {frame_name}")
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("pick_event", on_pick)
     ani = FuncAnimation(fig, update, frames=total_frames, interval=interval, repeat=True)
     plt.show()
 
