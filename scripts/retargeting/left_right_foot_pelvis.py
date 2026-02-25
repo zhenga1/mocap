@@ -45,17 +45,27 @@ URDF_PATH = os.path.join(
 if not os.path.isfile(URDF_PATH):
     URDF_PATH = "C:\\Users\\aaron\\IsaacSim_4.0.0\\Berkeley-Humanoid-Lite\\source\\berkeley_humanoid_lite_assets\\data\\robots\\berkeley_humanoid\\berkeley_humanoid_lite\\urdf\\berkeley_humanoid_lite.urdf"
 
-SUBJECTS_DIR = "../subjects"
-OUTPUT_DIR = "../retargeted_only_pelvis_left_right_foot"
+SUBJECTS_DIR = "../../subjects"
+OUTPUT_DIR = "../../retargeted_only_pelvis_left_right_foot"
 SCALE = 0.45
 DT = 0.02
+HEIGHT_OFFSET = 0.8
 
 
-def _to_robot_pos(coordinate):
-    """Human [3,1] -> robot frame: (x, y, z) -> (x, z, y) and scale."""
-    x, y, z = coordinate[0, 0], coordinate[1, 0], coordinate[2, 0]
-    return np.array([x, z, y], dtype=float) * SCALE
+# def _to_robot_pos(coordinate):
+#     """Human [3,1] -> robot frame: (x, y, z) -> (x, z, y) and scale."""
+#     x, y, z = coordinate[0, 0], coordinate[1, 0], coordinate[2, 0]
+#     return np.array([x, z, y], dtype=float) * SCALE
 
+
+def get_scaled_target(human_coordinate, init_pelvis):
+    relative_pos = human_coordinate - init_pelvis
+    scaled_x = relative_pos[0, 0] * SCALE
+    scaled_y = relative_pos[1, 0] * SCALE
+    scaled_z = relative_pos[2, 0] * SCALE + HEIGHT_OFFSET
+    scaled_pos = np.array([scaled_x, scaled_y, scaled_z], dtype=float)
+
+    return scaled_pos
 
 def retarget_motion(asf_path, amc_path, robot, configuration, pelvis_task, left_foot_task, right_foot_task):
     """Retarget one AMC with one ASF; returns list of q vectors."""
@@ -63,14 +73,19 @@ def retarget_motion(asf_path, amc_path, robot, configuration, pelvis_task, left_
     motions = amc.parse_amc(amc_path)
     configuration.q = robot.q0.copy()
     retargeted = []
-    for frame in motions:
+    # Joints root is basically None
+    #initial_pelvis_position = joints["root"].coordinate
+
+    for i,frame in enumerate(motions):
         joints["root"].set_motion(frame)
+        if i == 0:
+            initial_pelvis_position = joints["root"].coordinate
         human_lfoot = joints["lfoot"].coordinate
         human_rfoot = joints["rfoot"].coordinate
         human_pelvis = joints["root"].coordinate
-        left_foot_task.set_target(pin.SE3(np.eye(3), _to_robot_pos(human_lfoot)))
-        right_foot_task.set_target(pin.SE3(np.eye(3), _to_robot_pos(human_rfoot)))
-        pelvis_task.set_target(pin.SE3(np.eye(3), _to_robot_pos(human_pelvis)))
+        left_foot_task.set_target(pin.SE3(np.eye(3), get_scaled_target(human_lfoot, initial_pelvis_position)))
+        right_foot_task.set_target(pin.SE3(np.eye(3), get_scaled_target(human_rfoot, initial_pelvis_position)))
+        pelvis_task.set_target(pin.SE3(np.eye(3), get_scaled_target(human_pelvis, initial_pelvis_position)))
         tasks = [pelvis_task, left_foot_task, right_foot_task]
         velocity = pink.solve_ik(configuration, tasks, dt=DT, solver="quadprog")
         configuration.integrate_inplace(velocity, DT)

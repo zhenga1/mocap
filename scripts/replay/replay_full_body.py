@@ -31,7 +31,7 @@ except ImportError:
     try:
         from retargeting import URDF_PATH, OUTPUT_DIR
         # Override to full-body output if root retargeting uses a different dir
-        OUTPUT_DIR = os.path.join(_r, "retargeted_full_body")
+        OUTPUT_DIR = os.path.join(_r, "retargeted_only_pelvis_left_right_foot")
     except ImportError:
         URDF_PATH = os.path.join(
             os.environ.get("BERKELEY_URDF", ""),
@@ -39,7 +39,7 @@ except ImportError:
         )
         if not os.path.isfile(URDF_PATH):
             URDF_PATH = "C:\\Users\\aaron\\IsaacSim_4.0.0\\Berkeley-Humanoid-Lite\\source\\berkeley_humanoid_lite_assets\\data\\robots\\berkeley_humanoid\\berkeley_humanoid_lite\\urdf\\berkeley_humanoid_lite.urdf"
-        OUTPUT_DIR = os.path.join(_r, "retargeted_full_body")
+        OUTPUT_DIR = os.path.join(_r, "retargeted_only_pelvis_left_right_foot")
 
 
 def load_robot():
