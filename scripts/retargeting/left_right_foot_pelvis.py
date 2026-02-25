@@ -59,13 +59,17 @@ HEIGHT_OFFSET = 0.8
 
 
 def get_scaled_target(human_coordinate, init_pelvis):
-    relative_pos = human_coordinate - init_pelvis
-    scaled_x = relative_pos[0, 0] * SCALE
-    scaled_y = relative_pos[1, 0] * SCALE
-    scaled_z = relative_pos[2, 0] * SCALE + HEIGHT_OFFSET
-    scaled_pos = np.array([scaled_x, scaled_y, scaled_z], dtype=float)
+    # CMU world (x, y, z), Y-up
+    # Getting the relative position of the human coordinate from the initial pelvis position
+    rel = human_coordinate - init_pelvis   # 3x1
+    dx, dy, dz = rel[0, 0], rel[1, 0], rel[2, 0]
 
-    return scaled_pos
+    # Map to robot world: (x, y, z) -> (x, z, y)
+    x_robot = dx * SCALE
+    y_robot = dz * SCALE
+    z_robot = dy * SCALE + HEIGHT_OFFSET   # keep pelvis roughly at a given height
+
+    return np.array([x_robot, y_robot, z_robot], dtype=float)
 
 def retarget_motion(asf_path, amc_path, robot, configuration, pelvis_task, left_foot_task, right_foot_task):
     """Retarget one AMC with one ASF; returns list of q vectors."""
