@@ -94,14 +94,15 @@ def build_tasks_for_skeleton(robot, joints_dict, mapping_list):
 
 
 def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names):
-    """Retarget one AMC with one ASF using full-body tasks; returns (T, nq)."""
+    """Retarget one AMC with one ASF using full-body tasks; returns (T, nq), (T, 3) root trajectory."""
     joints = amc.parse_asf(asf_path)
     motions = amc.parse_amc(amc_path)
     if not motions:
-        return np.zeros((0, robot.model.nq))
+        return np.zeros((0, robot.model.nq)), np.zeros((0, 3))
 
     configuration.q = robot.q0.copy()
     retargeted = []
+    root_positions = []
 
     # Use the pelvis/root position from the first frame as the reference for all
     # world positions, so both human and robot move in a comparable frame.
@@ -114,6 +115,7 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
         # Get current root position in robot frame
         root_pos = joints["root"].coordinate.copy()
         root_robot_pos = _to_robot_pos_relative(root_pos, init_root)
+        root_positions.append(root_robot_pos)
         for task, cmu_name in zip(tasks, task_cmu_names):
             pos = joints[cmu_name].coordinate
             target = _to_robot_pos_relative(pos, init_root) - root_robot_pos
@@ -121,7 +123,7 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
         velocity = pink.solve_ik(configuration, tasks, dt=DT, solver="quadprog")
         configuration.integrate_inplace(velocity, DT)
         retargeted.append(configuration.q.copy())
-    return np.array(retargeted)
+    return np.array(retargeted), np.array(root_positions)
 
 
 def run_single(asf_path, amc_path, save_path=None):
@@ -135,11 +137,13 @@ def run_single(asf_path, amc_path, save_path=None):
     if not tasks:
         raise RuntimeError("No (robot frame, CMU joint) pairs found for this ASF.")
     configuration = pink.Configuration(robot.model, robot.data, robot.q0)
-    q_trajectory = retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names)
+    q_trajectory, root_positions = retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names)
     if save_path:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-        np.save(save_path, q_trajectory)
-        print(f"Saved {save_path} ({q_trajectory.shape[0]} frames, {len(tasks)} tasks)")
+        # Save q and root trajectory in one array (T, nq+3) so pelvis can move in replay
+        trajectory_with_root = np.hstack([q_trajectory, root_positions])
+        np.save(save_path, trajectory_with_root)
+        print(f"Saved {save_path} ({q_trajectory.shape[0]} frames, {len(tasks)} tasks, root trajectory included)")
     return q_trajectory
 
 
@@ -167,9 +171,10 @@ def run_batch(subjects_dir=SUBJECTS_DIR, output_dir=OUTPUT_DIR):
             out_name = f"{subject}_{motion_name}.npy"
             save_path = os.path.join(output_dir, out_name)
             try:
-                q_trajectory = retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names)
-                np.save(save_path, q_trajectory)
-                print(f"Saved {save_path} ({q_trajectory.shape[0]} frames, {len(tasks)} tasks)")
+                q_trajectory, root_positions = retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names)
+                trajectory_with_root = np.hstack([q_trajectory, root_positions])
+                np.save(save_path, trajectory_with_root)
+                print(f"Saved {save_path} ({q_trajectory.shape[0]} frames, {len(tasks)} tasks, root trajectory included)")
             except Exception as e:
                 print(f"Skip {asf_path} + {amc_path}: {e}")
 
