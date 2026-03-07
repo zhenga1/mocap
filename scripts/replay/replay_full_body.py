@@ -10,6 +10,7 @@ Usage:
   python replay_full_body.py ../retargeted_full_body/01_01_05.npy ../retargeted_full_body/01_01_01.npy
   python replay_full_body.py   # default: ../retargeted_full_body/01_01_01.npy
 """
+import argparse
 import os
 import sys
 
@@ -122,6 +123,8 @@ def animate_retargeted(npy_paths, interval=50):
         npy_paths = [os.path.join(OUTPUT_DIR, "01_01_01.npy")]
     robot = load_robot()
     model = robot.model
+    print(robot.model.nq)
+    print(robot.model.joints)
     skeleton_edges = build_skeleton_edges(model)
     base_fid = model.getFrameId("base") if model.existFrame("base") else 0
 
@@ -265,6 +268,8 @@ def animate_retargeted(npy_paths, interval=50):
 
 
 if __name__ == "__main__":
-    default_path = os.path.join(OUTPUT_DIR, "01_01_01.npy")
-    npy_paths = sys.argv[1:] if len(sys.argv) >= 2 else [default_path]
-    animate_retargeted(npy_paths)
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument("--npy_paths", nargs="+", default=[os.path.join(OUTPUT_DIR, "01_01_01.npy")])
+    argparser.add_argument("--interval", type=int, default=50)
+    args = argparser.parse_args()
+    animate_retargeted(args.npy_paths, args.interval)

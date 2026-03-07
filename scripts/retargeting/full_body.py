@@ -43,7 +43,7 @@ if not os.path.isfile(URDF_PATH):
 
 SUBJECTS_DIR = os.path.join(PROJECT_ROOT, "subjects")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "retargeted_full_body")
-SCALE = 0.45
+SCALE = 0.5
 DT = 0.02
 POSITION_COST = 1.0
 ORIENTATION_COST = 0.1
@@ -58,12 +58,13 @@ def _to_robot_pos_relative(human_coordinate, init_root):
     This mirrors the logic in left_right_foot_pelvis.get_scaled_target so
     both retargeters use a consistent world mapping.
     """
+    # subtracts the initial root position from the human coordinate
     rel = human_coordinate - init_root  # 3x1
     dx, dy, dz = rel[0, 0], rel[1, 0], rel[2, 0]
 
     # Map CMU (x, y, z) (Y-up) -> robot (x, y, z) (Z-up)
     x_robot = dx * SCALE
-    y_robot = dz * SCALE
+    y_robot = -dz * SCALE
     z_robot = dy * SCALE
 
     return np.array([x_robot, y_robot, z_robot], dtype=float)
@@ -105,13 +106,18 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
     # Use the pelvis/root position from the first frame as the reference for all
     # world positions, so both human and robot move in a comparable frame.
     joints["root"].set_motion(motions[0])
+    # pelvis/root position in everry frame
     init_root = joints["root"].coordinate.copy()
 
     for frame in motions:
         joints["root"].set_motion(frame)
+        # Get current root position in robot frame
+        root_pos = joints["root"].coordinate.copy()
+        root_robot_pos = _to_robot_pos_relative(root_pos, init_root)
         for task, cmu_name in zip(tasks, task_cmu_names):
             pos = joints[cmu_name].coordinate
-            task.set_target(pin.SE3(np.eye(3), _to_robot_pos_relative(pos, init_root)))
+            target = _to_robot_pos_relative(pos, init_root) - root_robot_pos
+            task.set_target(pin.SE3(np.eye(3), target))
         velocity = pink.solve_ik(configuration, tasks, dt=DT, solver="quadprog")
         configuration.integrate_inplace(velocity, DT)
         retargeted.append(configuration.q.copy())
