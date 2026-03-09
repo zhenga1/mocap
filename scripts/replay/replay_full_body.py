@@ -243,9 +243,10 @@ def animate_retargeted(npy_paths, interval=50, smooth_alpha=REPLAY_SMOOTH_ALPHA,
         root_yaw = yaw_trajectories[fi][row, 0]
         rot = _rotation_z(root_yaw)
         positions = get_all_frame_positions(robot, q)
-        # Apply root yaw and translation so the full body turns and moves coherently.
+        pivot = positions[base_fid].copy() if base_fid in positions else np.zeros(3, dtype=float)
+        # Apply root yaw around the base pivot, then world translation.
         for i in positions:
-            positions[i] = rot @ positions[i] + root_offset
+            positions[i] = rot @ (positions[i] - pivot) + pivot + root_offset
 
         # Update scatter data
         frame_ids = sorted(positions.keys())
@@ -313,7 +314,6 @@ def animate_retargeted(npy_paths, interval=50, smooth_alpha=REPLAY_SMOOTH_ALPHA,
         # Title with current frame index (like a simple frame slider)
         file_name = os.path.basename(paths_loaded[fi])
         ax.set_title(f"Full-body retargeted replay: {file_name}  Frame {frame_idx + 1}/{total_frames}")
-
     def on_pick(event):
         """Display the Pinocchio frame name when the user clicks a vertex."""
         artist = event.artist

@@ -55,7 +55,7 @@ DT = 0.02
 POSITION_COST = 1.0
 ORIENTATION_COST = 0.1
 # Smoothing for noisy CMU targets before IK (offline, so bidirectional is fine).
-TARGET_SMOOTH_ALPHA = 0.3
+TARGET_SMOOTH_ALPHA = 0.2
 TARGET_SMOOTH_PASSES = 2
 # Root trajectory smoothing (saved and replayed as world offset).
 ROOT_SMOOTH_ALPHA = 0.25
@@ -202,13 +202,12 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
 
         yaw = _estimate_heading_yaw_from_joints(joints, init_root)
         root_yaws[fi, 0] = yaw
-        rot_inv = _rotation_z(-yaw)
 
         for ti, cmu_name in enumerate(task_cmu_names):
             pos = joints[cmu_name].coordinate
-            # Body-frame targets reduce limb twisting when global heading changes.
+            # Keep IK targets in root-relative world frame; heading is applied in replay.
             target_world_rel = _to_robot_pos_relative(pos, root_pos, init_root)
-            raw_targets[fi, ti] = rot_inv @ target_world_rel
+            raw_targets[fi, ti] = target_world_rel
 
     smoothed_targets = raw_targets.copy()
     if TARGET_SMOOTH_ALPHA > 0.0:
@@ -316,3 +315,4 @@ if __name__ == "__main__":
         run_single(asf_path, amc_path, save_path)
     else:
         run_batch()
+
