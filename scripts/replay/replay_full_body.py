@@ -138,18 +138,35 @@ def _smooth_bidirectional_exponential(data, alpha, passes=1):
         out = _smooth_exponential(out[::-1], alpha)[::-1]
     return out
 
-def _smooth_replay_data(q, root_pos, alpha, passes):
+def _smooth_replay_data(q, root_pos, root_yaw, alpha, passes):
     if alpha <= 0.0:
-        return q, root_pos
+        return q, root_pos, root_yaw
+    yaw_unwrapped = np.unwrap(root_yaw[:, 0])
+    yaw_smoothed = _smooth_bidirectional_exponential(
+        yaw_unwrapped.reshape(-1, 1),
+        alpha,
+        passes=passes,
+    )
     return (
         _smooth_bidirectional_exponential(q, alpha, passes=passes),
         _smooth_bidirectional_exponential(root_pos, alpha, passes=passes),
+        yaw_smoothed,
+    )
+
+
+def _rotation_z(yaw):
+    c = np.cos(yaw)
+    s = np.sin(yaw)
+    return np.array(
+        [[c, -s, 0.0],
+         [s, c, 0.0],
+         [0.0, 0.0, 1.0]],
+        dtype=float,
     )
 
 
 def animate_retargeted(npy_paths, interval=50, smooth_alpha=REPLAY_SMOOTH_ALPHA, smooth_passes=REPLAY_SMOOTH_PASSES):
-    """Animate one or more retargeted .npy files; draw full skeleton + pelvis trajectory.
-    Supports both legacy (T, nq) and new (T, nq+3) format; last 3 columns = root position for moving pelvis."""
+    """Animate retargeted .npy files with optional root translation + yaw heading."""
     if not npy_paths:
         npy_paths = [os.path.join(OUTPUT_DIR, "01_01_01.npy")]
     robot = load_robot()
@@ -168,27 +185,33 @@ def animate_retargeted(npy_paths, interval=50, smooth_alpha=REPLAY_SMOOTH_ALPHA,
         data = np.load(path)
         if data.ndim == 1:
             data = data.reshape(1, -1)
-        # New format: (T, nq+3) with root trajectory; legacy: (T, nq)
-        if data.shape[1] >= nq + 3:
+        # New format: (T, nq+4) with root position + yaw; older: (T, nq+3); legacy: (T, nq)
+        if data.shape[1] >= nq + 4:
             q = data[:, :nq].copy()
             root_pos = data[:, nq:nq + 3].copy()
+            root_yaw = data[:, nq + 3:nq + 4].copy()
+        elif data.shape[1] >= nq + 3:
+            q = data[:, :nq].copy()
+            root_pos = data[:, nq:nq + 3].copy()
+            root_yaw = np.zeros((q.shape[0], 1), dtype=float)
         else:
             q = data[:, :nq].copy()
-            root_pos = np.zeros((q.shape[0], 3))
-        q, root_pos = _smooth_replay_data(q, root_pos, smooth_alpha, smooth_passes)
-        all_q.append((path, q, root_pos))
+            root_pos = np.zeros((q.shape[0], 3), dtype=float)
+            root_yaw = np.zeros((q.shape[0], 1), dtype=float)
+        q, root_pos, root_yaw = _smooth_replay_data(q, root_pos, root_yaw, smooth_alpha, smooth_passes)
+        all_q.append((path, q, root_pos, root_yaw))
     if not all_q:
         raise FileNotFoundError("No .npy files found.")
 
-    q_trajectories = [q for _, q, _ in all_q]
-    root_trajectories = [rp for _, _, rp in all_q]
-    paths_loaded = [p for p, _, _ in all_q]
+    q_trajectories = [q for _, q, _, _ in all_q]
+    root_trajectories = [rp for _, _, rp, _ in all_q]
+    yaw_trajectories = [ry for _, _, _, ry in all_q]
+    paths_loaded = [p for p, _, _, _ in all_q]
     total_frames = sum(q.shape[0] for q in q_trajectories)
     frame_to_file_and_row = []
     for fi, q in enumerate(q_trajectories):
         for row in range(q.shape[0]):
             frame_to_file_and_row.append((fi, row))
-
 
     lines = []
     fig = plt.figure(figsize=(10, 8))
@@ -217,11 +240,12 @@ def animate_retargeted(npy_paths, interval=50, smooth_alpha=REPLAY_SMOOTH_ALPHA,
         fi, row = frame_to_file_and_row[frame_idx]
         q = q_trajectories[fi][row]
         root_offset = root_trajectories[fi][row]
+        root_yaw = yaw_trajectories[fi][row, 0]
+        rot = _rotation_z(root_yaw)
         positions = get_all_frame_positions(robot, q)
-        # Apply root trajectory so the whole skeleton (pelvis) moves in world frame
+        # Apply root yaw and translation so the full body turns and moves coherently.
         for i in positions:
-            # this moves the whole skeleton (including the pelvis)
-            positions[i] = positions[i] + root_offset
+            positions[i] = rot @ positions[i] + root_offset
 
         # Update scatter data
         frame_ids = sorted(positions.keys())

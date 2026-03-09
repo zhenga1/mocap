@@ -63,6 +63,14 @@ ROOT_SMOOTH_ALPHA = 0.25
 MAX_Q_STEP = 0.08
 # Optional post-IK q smoothing. Keep off by default to avoid over-damping.
 POST_Q_SMOOTH_ALPHA = 0.0
+YAW_SMOOTH_ALPHA = 0.2
+
+HEADING_LEFT_RIGHT_CANDIDATES = [
+    ("lhipjoint", "rhipjoint"),
+    ("lhip", "rhip"),
+    ("lclavicle", "rclavicle"),
+    ("lshoulder", "rshoulder"),
+]
 
 
 def _to_robot_world(human_coordinate, init_root):
@@ -139,35 +147,68 @@ def _smooth_bidirectional_exponential(data, alpha, passes=1):
         out = _smooth_exponential(out[::-1], alpha)[::-1]
     return out
 
+def _wrap_to_pi(angle):
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+def _rotation_z(yaw):
+    c = np.cos(yaw)
+    s = np.sin(yaw)
+    return np.array(
+        [[c, -s, 0.0],
+         [s, c, 0.0],
+         [0.0, 0.0, 1.0]],
+        dtype=float,
+    )
+
+def _estimate_heading_yaw_from_joints(joints, init_root):
+    """Estimate heading yaw from left-right body landmarks in robot world frame."""
+    for left_name, right_name in HEADING_LEFT_RIGHT_CANDIDATES:
+        if left_name not in joints or right_name not in joints:
+            continue
+        left_world = _to_robot_world(joints[left_name].coordinate, init_root)
+        right_world = _to_robot_world(joints[right_name].coordinate, init_root)
+        lateral = left_world - right_world
+        lateral_xy = lateral[:2]
+        norm = np.linalg.norm(lateral_xy)
+        if norm < 1e-6:
+            continue
+        lateral_xy = lateral_xy / norm
+        forward_xy = np.array([-lateral_xy[1], lateral_xy[0]], dtype=float)
+        return float(np.arctan2(forward_xy[1], forward_xy[0]))
+    return 0.0
+
 def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names):
-    """Retarget one AMC with one ASF using full-body tasks; returns (T, nq), (T, 3) root trajectory."""
+    """Retarget one AMC with one ASF; returns (T, nq), (T, 3) root position, (T, 1) root yaw."""
     joints = amc.parse_asf(asf_path)
     motions = amc.parse_amc(amc_path)
     if not motions:
-        return np.zeros((0, robot.model.nq)), np.zeros((0, 3))
+        return np.zeros((0, robot.model.nq)), np.zeros((0, 3)), np.zeros((0, 1))
 
     # Use the pelvis/root position from the first frame as the reference for all
     # world positions, so both human and robot move in a comparable frame.
     joints["root"].set_motion(motions[0])
-    # pelvis/root position in every frame
     init_root = joints["root"].coordinate.copy()
 
     n_frames = len(motions)
     n_tasks = len(tasks)
     raw_targets = np.zeros((n_frames, n_tasks, 3), dtype=float)
     root_positions = np.zeros((n_frames, 3), dtype=float)
+    root_yaws = np.zeros((n_frames, 1), dtype=float)
 
     for fi, frame in enumerate(motions):
         joints["root"].set_motion(frame)
         root_pos = joints["root"].coordinate.copy()
         root_positions[fi] = _to_robot_world(root_pos, init_root)
+
+        yaw = _estimate_heading_yaw_from_joints(joints, init_root)
+        root_yaws[fi, 0] = yaw
+        rot_inv = _rotation_z(-yaw)
+
         for ti, cmu_name in enumerate(task_cmu_names):
             pos = joints[cmu_name].coordinate
-            # Express each joint target in the root (pelvis) local frame so we
-            # can later add the saved root trajectory back as a rigid offset
-            # during replay. This keeps IK well-conditioned while still giving
-            # us a moving pelvis.
-            raw_targets[fi, ti] = _to_robot_pos_relative(pos, root_pos, init_root)
+            # Body-frame targets reduce limb twisting when global heading changes.
+            target_world_rel = _to_robot_pos_relative(pos, root_pos, init_root)
+            raw_targets[fi, ti] = rot_inv @ target_world_rel
 
     smoothed_targets = raw_targets.copy()
     if TARGET_SMOOTH_ALPHA > 0.0:
@@ -183,6 +224,14 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
             ROOT_SMOOTH_ALPHA,
             passes=TARGET_SMOOTH_PASSES,
         )
+    if YAW_SMOOTH_ALPHA > 0.0:
+        yaw_unwrapped = np.unwrap(root_yaws[:, 0])
+        yaw_smoothed = _smooth_bidirectional_exponential(
+            yaw_unwrapped.reshape(-1, 1),
+            YAW_SMOOTH_ALPHA,
+            passes=TARGET_SMOOTH_PASSES,
+        )[:, 0]
+        root_yaws[:, 0] = _wrap_to_pi(yaw_smoothed)
 
     configuration.q = robot.q0.copy()
     retargeted = []
@@ -205,7 +254,7 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
             POST_Q_SMOOTH_ALPHA,
             passes=TARGET_SMOOTH_PASSES,
         )
-    return q_array, root_positions
+    return q_array, root_positions, root_yaws
 
 def run_single(asf_path, amc_path, save_path=None):
     """Run full-body retargeting for one (asf, amc) pair."""
@@ -218,11 +267,11 @@ def run_single(asf_path, amc_path, save_path=None):
     if not tasks:
         raise RuntimeError("No (robot frame, CMU joint) pairs found for this ASF.")
     configuration = pink.Configuration(robot.model, robot.data, robot.q0)
-    q_trajectory, root_positions = retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names)
+    q_trajectory, root_positions, root_yaws = retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names)
     if save_path:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-        # Save q and root trajectory in one array (T, nq+3) so pelvis can move in replay
-        trajectory_with_root = np.hstack([q_trajectory, root_positions])
+        # Save q + root position + root yaw so replay can move and rotate pelvis in world.
+        trajectory_with_root = np.hstack([q_trajectory, root_positions, root_yaws])
         np.save(save_path, trajectory_with_root)
         print(f"Saved {save_path} ({q_trajectory.shape[0]} frames, {len(tasks)} tasks, root trajectory included)")
     return q_trajectory
@@ -252,8 +301,8 @@ def run_batch(subjects_dir=SUBJECTS_DIR, output_dir=OUTPUT_DIR):
             out_name = f"{subject}_{motion_name}.npy"
             save_path = os.path.join(output_dir, out_name)
             try:
-                q_trajectory, root_positions = retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names)
-                trajectory_with_root = np.hstack([q_trajectory, root_positions])
+                q_trajectory, root_positions, root_yaws = retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names)
+                trajectory_with_root = np.hstack([q_trajectory, root_positions, root_yaws])
                 np.save(save_path, trajectory_with_root)
                 print(f"Saved {save_path} ({q_trajectory.shape[0]} frames, {len(tasks)} tasks, root trajectory included)")
             except Exception as e:
