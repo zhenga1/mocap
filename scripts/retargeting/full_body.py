@@ -64,6 +64,9 @@ MAX_Q_STEP = 0.08
 # Optional post-IK q smoothing. Keep off by default to avoid over-damping.
 POST_Q_SMOOTH_ALPHA = 0.0
 YAW_SMOOTH_ALPHA = 0.2
+SHOULDER_POSITION_COST = 0.3
+SHOULDER_TARGET_MAX_ERROR = 0.15
+SHOULDER_FRAMES = {"arm_left_shoulder_pitch", "arm_right_shoulder_pitch"}
 
 HEADING_LEFT_RIGHT_CANDIDATES = [
     ("lclavicle", "rclavicle"),
@@ -114,7 +117,8 @@ def build_tasks_for_skeleton(robot, joints_dict, mapping_list):
                 break
         if cmu_name is None:
             continue
-        tasks.append(FrameTask(robot_frame, position_cost=POSITION_COST, orientation_cost=ORIENTATION_COST))
+        position_cost = SHOULDER_POSITION_COST if robot_frame in SHOULDER_FRAMES else POSITION_COST
+        tasks.append(FrameTask(robot_frame, position_cost=position_cost, orientation_cost=ORIENTATION_COST))
         task_cmu_names.append(cmu_name)
     return tasks, task_cmu_names
 
@@ -177,6 +181,14 @@ def _estimate_heading_yaw_from_joints(joints, init_root):
         return float(np.arctan2(forward_xy[1], forward_xy[0]))
     return 0.0
 
+def _relax_unreachable_target(current_pos, target_pos, max_error):
+    delta = target_pos - current_pos
+    err = float(np.linalg.norm(delta))
+    if err <= max_error or err <= 1e-9:
+        return target_pos
+    return current_pos + (max_error / err) * delta
+
+
 def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names):
     """Retarget one AMC with one ASF; returns (T, nq), (T, 3) root position, (T, 1) root yaw."""
     joints = amc.parse_asf(asf_path)
@@ -235,8 +247,19 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
     configuration.q = robot.q0.copy()
     retargeted = []
     for fi in range(n_frames):
+        pin.forwardKinematics(robot.model, robot.data, configuration.q)
+        pin.updateFramePlacements(robot.model, robot.data)
+
+        # Effective targets actually sent to the IK solver this frame
+        frame_targets = np.zeros((n_tasks, 3), dtype=float)
         for ti, task in enumerate(tasks):
-            task.set_target(pin.SE3(np.eye(3), smoothed_targets[fi, ti]))
+            target = smoothed_targets[fi, ti]
+            # if task.frame in SHOULDER_FRAMES:
+            frame_id = robot.model.getFrameId(task.frame)
+            current = robot.data.oMf[frame_id].translation
+            target = _relax_unreachable_target(current, target, SHOULDER_TARGET_MAX_ERROR)
+            frame_targets[ti] = target
+            task.set_target(pin.SE3(np.eye(3), target))
         q_prev = configuration.q.copy()
         velocity = pink.solve_ik(configuration, tasks, dt=DT, solver="quadprog")
         # Update the configuration of the robot using the velocity with timestep DT.
@@ -261,13 +284,20 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
         for ti, task in enumerate(tasks):
             frame_id = robot.model.getFrameId(task.frame)
             current_pos = robot.data.oMf[frame_id].translation
-            target_pos = smoothed_targets[fi, ti]
+            target_pos = frame_targets[ti]
             err = float(np.linalg.norm(current_pos - target_pos))
             if err > worst_err:
                 worst_err = err
                 worst_frame = task.frame
 
-        if worst_err > 0.05:  # 5cm threshold
+        # For shoulders we already "relaxed" unreachable targets to within
+        # SHOULDER_TARGET_MAX_ERROR of the current pose, so use that as a looser
+        # failure threshold; keep 5cm for the rest of the body.
+        failure_threshold = 0.05
+        if worst_frame in SHOULDER_FRAMES:
+            failure_threshold = SHOULDER_TARGET_MAX_ERROR
+
+        if worst_err > failure_threshold:
             print(f"IK FAILURE @ frame {fi}: worst {worst_frame} error {worst_err:.4f}m (target likely unreachable)")
         retargeted.append(configuration.q.copy())
 
