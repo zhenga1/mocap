@@ -239,11 +239,36 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
             task.set_target(pin.SE3(np.eye(3), smoothed_targets[fi, ti]))
         q_prev = configuration.q.copy()
         velocity = pink.solve_ik(configuration, tasks, dt=DT, solver="quadprog")
-        configuration.integrate_inplace(velocity, DT)
+        # Update the configuration of the robot using the velocity with timestep DT.
+        # If the solver returns non-finite values, treat it as a hard failure for this frame.
+        if not np.all(np.isfinite(velocity)):
+            # just use the previous configuration (i.e. no change)
+            configuration.q = q_prev
+        else:
+            configuration.integrate_inplace(velocity, DT)
         if MAX_Q_STEP > 0.0:
             q_next = configuration.q.copy()
             dq = np.clip(q_next - q_prev, -MAX_Q_STEP, MAX_Q_STEP)
             configuration.q = q_prev + dq
+
+        # Check for IK "failure" by evaluating achieved vs requested frame positions.
+        # (Pink may not raise on infeasible tasks; this catches unreachable targets.)
+        pin.forwardKinematics(robot.model, robot.data, configuration.q)
+        pin.updateFramePlacements(robot.model, robot.data)
+
+        worst_err = 0.0
+        worst_frame = None
+        for ti, task in enumerate(tasks):
+            frame_id = robot.model.getFrameId(task.frame)
+            current_pos = robot.data.oMf[frame_id].translation
+            target_pos = smoothed_targets[fi, ti]
+            err = float(np.linalg.norm(current_pos - target_pos))
+            if err > worst_err:
+                worst_err = err
+                worst_frame = task.frame
+
+        if worst_err > 0.05:  # 5cm threshold
+            print(f"IK FAILURE @ frame {fi}: worst {worst_frame} error {worst_err:.4f}m (target likely unreachable)")
         retargeted.append(configuration.q.copy())
 
     q_array = np.array(retargeted)
