@@ -66,10 +66,10 @@ POST_Q_SMOOTH_ALPHA = 0.0
 YAW_SMOOTH_ALPHA = 0.2
 
 HEADING_LEFT_RIGHT_CANDIDATES = [
-    ("lhipjoint", "rhipjoint"),
-    ("lhip", "rhip"),
     ("lclavicle", "rclavicle"),
     ("lshoulder", "rshoulder"),
+    ("lhipjoint", "rhipjoint"),
+    ("lhip", "rhip"),
 ]
 
 
