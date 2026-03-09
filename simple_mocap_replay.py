@@ -131,5 +131,5 @@ def animate_mocap(asf_path, amc_path):
     plt.show()
 
 # Run it
-animate_mocap('subjects/01/01.asf', 'subjects/01/01_05.amc')
+animate_mocap('subjects/01/01.asf', 'subjects/01/01_01.amc')
 #animate_mocap('subjects/103/103.asf', 'subjects/103/103_01.amc')

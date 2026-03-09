@@ -79,6 +79,10 @@ SKELETON_EDGES_BY_NAME = [
 ]
 
 
+# Replay-time smoothing for already-retargeted trajectories.
+REPLAY_SMOOTH_ALPHA = 0.2
+REPLAY_SMOOTH_PASSES = 2
+
 def load_robot():
     urdf_dir = os.path.dirname(os.path.abspath(URDF_PATH))
     robot = pin.RobotWrapper.BuildFromURDF(
@@ -116,8 +120,34 @@ def get_all_frame_positions(robot, q):
         positions[i] = robot.data.oMf[i].translation.copy()
     return positions
 
+def _smooth_exponential(data, alpha):
+    if data.size == 0 or alpha <= 0.0:
+        return data
+    out = np.empty_like(data)
+    out[0] = data[0]
+    for t in range(1, data.shape[0]):
+        out[t] = alpha * data[t] + (1.0 - alpha) * out[t - 1]
+    return out
 
-def animate_retargeted(npy_paths, interval=50):
+def _smooth_bidirectional_exponential(data, alpha, passes=1):
+    if data.size == 0 or alpha <= 0.0:
+        return data
+    out = data.copy()
+    for _ in range(max(1, int(passes))):
+        out = _smooth_exponential(out, alpha)
+        out = _smooth_exponential(out[::-1], alpha)[::-1]
+    return out
+
+def _smooth_replay_data(q, root_pos, alpha, passes):
+    if alpha <= 0.0:
+        return q, root_pos
+    return (
+        _smooth_bidirectional_exponential(q, alpha, passes=passes),
+        _smooth_bidirectional_exponential(root_pos, alpha, passes=passes),
+    )
+
+
+def animate_retargeted(npy_paths, interval=50, smooth_alpha=REPLAY_SMOOTH_ALPHA, smooth_passes=REPLAY_SMOOTH_PASSES):
     """Animate one or more retargeted .npy files; draw full skeleton + pelvis trajectory.
     Supports both legacy (T, nq) and new (T, nq+3) format; last 3 columns = root position for moving pelvis."""
     if not npy_paths:
@@ -145,6 +175,7 @@ def animate_retargeted(npy_paths, interval=50):
         else:
             q = data[:, :nq].copy()
             root_pos = np.zeros((q.shape[0], 3))
+        q, root_pos = _smooth_replay_data(q, root_pos, smooth_alpha, smooth_passes)
         all_q.append((path, q, root_pos))
     if not all_q:
         raise FileNotFoundError("No .npy files found.")
@@ -189,6 +220,7 @@ def animate_retargeted(npy_paths, interval=50):
         positions = get_all_frame_positions(robot, q)
         # Apply root trajectory so the whole skeleton (pelvis) moves in world frame
         for i in positions:
+            # this moves the whole skeleton (including the pelvis)
             positions[i] = positions[i] + root_offset
 
         # Update scatter data
@@ -286,5 +318,7 @@ if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument("--npy_paths", nargs="+", default=[os.path.join(OUTPUT_DIR, "01_01_01.npy")])
     argparser.add_argument("--interval", type=int, default=50)
+    argparser.add_argument("--smooth_alpha", type=float, default=REPLAY_SMOOTH_ALPHA)
+    argparser.add_argument("--smooth_passes", type=int, default=REPLAY_SMOOTH_PASSES)
     args = argparser.parse_args()
-    animate_retargeted(args.npy_paths, args.interval)
+    animate_retargeted(args.npy_paths, args.interval, args.smooth_alpha, args.smooth_passes)

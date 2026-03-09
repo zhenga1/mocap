@@ -27,6 +27,14 @@ import numpy as np
 import pink
 from pink.tasks import FrameTask
 
+# Reuse the world-coordinate mapping that we already validated in
+# left_right_foot_pelvis so both retargeters share exactly the same
+# CMU->robot axis conventions and scale.
+try:
+    from scripts.retargeting.left_right_foot_pelvis import get_scaled_target as _lr_get_scaled_target
+except ImportError:
+    from left_right_foot_pelvis import get_scaled_target as _lr_get_scaled_target
+
 # Load mapping from same directory (works from project root or scripts/retargeting)
 try:
     from scripts.retargeting.cmu_to_berkeley_mapping import BERKELEY_TO_CMU, BERKELEY_TO_CMU_ALT
@@ -43,31 +51,41 @@ if not os.path.isfile(URDF_PATH):
 
 SUBJECTS_DIR = os.path.join(PROJECT_ROOT, "subjects")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "retargeted_full_body")
-SCALE = 0.5
 DT = 0.02
 POSITION_COST = 1.0
 ORIENTATION_COST = 0.1
+# Smoothing for noisy CMU targets before IK (offline, so bidirectional is fine).
+TARGET_SMOOTH_ALPHA = 0.3
+TARGET_SMOOTH_PASSES = 2
+# Root trajectory smoothing (saved and replayed as world offset).
+ROOT_SMOOTH_ALPHA = 0.25
+# Safety clamp for per-frame configuration jumps (radians for joints).
+MAX_Q_STEP = 0.08
+# Optional post-IK q smoothing. Keep off by default to avoid over-damping.
+POST_Q_SMOOTH_ALPHA = 0.0
 
 
-def _to_robot_pos_relative(human_coordinate, init_root):
+def _to_robot_world(human_coordinate, init_root):
+    """
+    Human [3,1] -> robot *world* coordinates using the exact same mapping
+    as left_right_foot_pelvis.get_scaled_target (CMU Y-up -> robot Z-up,
+    global scale, vertical offset).
+    """
+    return _lr_get_scaled_target(human_coordinate, init_root)
+
+
+def _to_robot_pos_relative(joint_coordinate, root_coordinate, init_root):
     """
     Human [3,1] -> robot frame with:
       - coordinates made relative to the initial pelvis/root position
-      - CMU Y-up -> robot Z-up axis swap
-      - global scale + small vertical offset for better stance.
-    This mirrors the logic in left_right_foot_pelvis.get_scaled_target so
-    both retargeters use a consistent world mapping.
+      - world mapping shared with left_right_foot_pelvis
+
+    We first map both the joint and the root to the robot *world* frame using
+    _to_robot_world, then express the joint position in the root's local frame.
     """
-    # subtracts the initial root position from the human coordinate
-    rel = human_coordinate - init_root  # 3x1
-    dx, dy, dz = rel[0, 0], rel[1, 0], rel[2, 0]
-
-    # Map CMU (x, y, z) (Y-up) -> robot (x, y, z) (Z-up)
-    x_robot = dx * SCALE
-    y_robot = -dz * SCALE
-    z_robot = dy * SCALE
-
-    return np.array([x_robot, y_robot, z_robot], dtype=float)
+    joint_world = _to_robot_world(joint_coordinate, init_root)
+    root_world = _to_robot_world(root_coordinate, init_root)
+    return joint_world - root_world
 
 
 def build_tasks_for_skeleton(robot, joints_dict, mapping_list):
@@ -93,6 +111,34 @@ def build_tasks_for_skeleton(robot, joints_dict, mapping_list):
     return tasks, task_cmu_names
 
 
+def _smooth_exponential(data, alpha):
+    """
+    Simple per-dimension exponential moving average over time:
+        y[t] = alpha * x[t] + (1 - alpha) * y[t-1]
+    data: (T, D) array.
+    """
+    if data.size == 0 or alpha <= 0.0:
+        return data
+    smoothed = np.empty_like(data)
+    smoothed[0] = data[0]
+    for t in range(1, data.shape[0]):
+        smoothed[t] = alpha * data[t] + (1.0 - alpha) * smoothed[t - 1]
+    return smoothed
+
+
+def _smooth_bidirectional_exponential(data, alpha, passes=1):
+    """
+    Zero-phase-like smoothing by running EMA forward and backward.
+    data: (T, D) array.
+    """
+    if data.size == 0 or alpha <= 0.0:
+        return data
+    out = data.copy()
+    for _ in range(max(1, int(passes))):
+        out = _smooth_exponential(out, alpha)
+        out = _smooth_exponential(out[::-1], alpha)[::-1]
+    return out
+
 def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names):
     """Retarget one AMC with one ASF using full-body tasks; returns (T, nq), (T, 3) root trajectory."""
     joints = amc.parse_asf(asf_path)
@@ -100,31 +146,66 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
     if not motions:
         return np.zeros((0, robot.model.nq)), np.zeros((0, 3))
 
-    configuration.q = robot.q0.copy()
-    retargeted = []
-    root_positions = []
-
     # Use the pelvis/root position from the first frame as the reference for all
     # world positions, so both human and robot move in a comparable frame.
     joints["root"].set_motion(motions[0])
-    # pelvis/root position in everry frame
+    # pelvis/root position in every frame
     init_root = joints["root"].coordinate.copy()
 
-    for frame in motions:
+    n_frames = len(motions)
+    n_tasks = len(tasks)
+    raw_targets = np.zeros((n_frames, n_tasks, 3), dtype=float)
+    root_positions = np.zeros((n_frames, 3), dtype=float)
+
+    for fi, frame in enumerate(motions):
         joints["root"].set_motion(frame)
-        # Get current root position in robot frame
         root_pos = joints["root"].coordinate.copy()
-        root_robot_pos = _to_robot_pos_relative(root_pos, init_root)
-        root_positions.append(root_robot_pos)
-        for task, cmu_name in zip(tasks, task_cmu_names):
+        root_positions[fi] = _to_robot_world(root_pos, init_root)
+        for ti, cmu_name in enumerate(task_cmu_names):
             pos = joints[cmu_name].coordinate
-            target = _to_robot_pos_relative(pos, init_root) - root_robot_pos
-            task.set_target(pin.SE3(np.eye(3), target))
+            # Express each joint target in the root (pelvis) local frame so we
+            # can later add the saved root trajectory back as a rigid offset
+            # during replay. This keeps IK well-conditioned while still giving
+            # us a moving pelvis.
+            raw_targets[fi, ti] = _to_robot_pos_relative(pos, root_pos, init_root)
+
+    smoothed_targets = raw_targets.copy()
+    if TARGET_SMOOTH_ALPHA > 0.0:
+        for ti in range(n_tasks):
+            smoothed_targets[:, ti, :] = _smooth_bidirectional_exponential(
+                smoothed_targets[:, ti, :],
+                TARGET_SMOOTH_ALPHA,
+                passes=TARGET_SMOOTH_PASSES,
+            )
+    if ROOT_SMOOTH_ALPHA > 0.0:
+        root_positions = _smooth_bidirectional_exponential(
+            root_positions,
+            ROOT_SMOOTH_ALPHA,
+            passes=TARGET_SMOOTH_PASSES,
+        )
+
+    configuration.q = robot.q0.copy()
+    retargeted = []
+    for fi in range(n_frames):
+        for ti, task in enumerate(tasks):
+            task.set_target(pin.SE3(np.eye(3), smoothed_targets[fi, ti]))
+        q_prev = configuration.q.copy()
         velocity = pink.solve_ik(configuration, tasks, dt=DT, solver="quadprog")
         configuration.integrate_inplace(velocity, DT)
+        if MAX_Q_STEP > 0.0:
+            q_next = configuration.q.copy()
+            dq = np.clip(q_next - q_prev, -MAX_Q_STEP, MAX_Q_STEP)
+            configuration.q = q_prev + dq
         retargeted.append(configuration.q.copy())
-    return np.array(retargeted), np.array(root_positions)
 
+    q_array = np.array(retargeted)
+    if POST_Q_SMOOTH_ALPHA > 0.0:
+        q_array = _smooth_bidirectional_exponential(
+            q_array,
+            POST_Q_SMOOTH_ALPHA,
+            passes=TARGET_SMOOTH_PASSES,
+        )
+    return q_array, root_positions
 
 def run_single(asf_path, amc_path, save_path=None):
     """Run full-body retargeting for one (asf, amc) pair."""

@@ -47,7 +47,7 @@ if not os.path.isfile(URDF_PATH):
 
 SUBJECTS_DIR = "../../subjects"
 OUTPUT_DIR = "../../retargeted_only_pelvis_left_right_foot"
-SCALE = 0.45
+SCALE = 0.02
 DT = 0.02
 HEIGHT_OFFSET = 0.8
 
