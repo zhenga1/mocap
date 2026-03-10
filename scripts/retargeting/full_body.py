@@ -67,6 +67,79 @@ YAW_SMOOTH_ALPHA = 0.2
 SHOULDER_POSITION_COST = 0.3
 SHOULDER_TARGET_MAX_ERROR = 0.15
 SHOULDER_FRAMES = {"arm_left_shoulder_pitch", "arm_right_shoulder_pitch"}
+TASK_SCALE_MIN = 0.25
+TASK_SCALE_MAX = 1.75
+
+# Distal and mid-chain points carry most of the pose signal while avoiding
+# infeasible proximal point targets on serial shoulder/hip links.
+ACTIVE_TASK_FRAMES = {
+    "base",
+    "leg_left_knee_pitch",
+    "leg_left_ankle_roll",
+    "leg_right_knee_pitch",
+    "leg_right_ankle_roll",
+    "arm_left_elbow_pitch",
+    "arm_left_hand_link",
+    "arm_right_elbow_pitch",
+    "arm_right_hand_link",
+}
+
+FRAME_POSITION_COSTS = {
+    "base": 1.5,
+    "leg_left_knee_pitch": 0.9,
+    "leg_left_ankle_roll": 1.4,
+    "leg_right_knee_pitch": 0.9,
+    "leg_right_ankle_roll": 1.4,
+    "arm_left_elbow_pitch": 0.6,
+    "arm_left_hand_link": 0.9,
+    "arm_right_elbow_pitch": 0.6,
+    "arm_right_hand_link": 0.9,
+}
+
+# Anchor-local retargeting spec: map each target to a human anchor, a robot
+# anchor frame, and the human bone path used for morphology scaling.
+FRAME_TARGET_CONFIG = {
+    "leg_left_knee_pitch": {
+        "human_anchor": "lhipjoint",
+        "robot_anchor_frame": "leg_left_hip_roll",
+        "human_path": ["lfemur"],
+    },
+    "leg_left_ankle_roll": {
+        "human_anchor": "lhipjoint",
+        "robot_anchor_frame": "leg_left_hip_roll",
+        "human_path": ["lfemur", "ltibia"],
+    },
+    "leg_right_knee_pitch": {
+        "human_anchor": "rhipjoint",
+        "robot_anchor_frame": "leg_right_hip_roll",
+        "human_path": ["rfemur"],
+    },
+    "leg_right_ankle_roll": {
+        "human_anchor": "rhipjoint",
+        "robot_anchor_frame": "leg_right_hip_roll",
+        "human_path": ["rfemur", "rtibia"],
+    },
+    "arm_left_elbow_pitch": {
+        "human_anchor": "lclavicle",
+        "robot_anchor_frame": "arm_left_shoulder_pitch",
+        "human_path": ["lhumerus"],
+    },
+    "arm_left_hand_link": {
+        "human_anchor": "lclavicle",
+        "robot_anchor_frame": "arm_left_shoulder_pitch",
+        "human_path": ["lhumerus", "lradius", "lwrist"],
+    },
+    "arm_right_elbow_pitch": {
+        "human_anchor": "rclavicle",
+        "robot_anchor_frame": "arm_right_shoulder_pitch",
+        "human_path": ["rhumerus"],
+    },
+    "arm_right_hand_link": {
+        "human_anchor": "rclavicle",
+        "robot_anchor_frame": "arm_right_shoulder_pitch",
+        "human_path": ["rhumerus", "rradius", "rwrist"],
+    },
+}
 
 HEADING_LEFT_RIGHT_CANDIDATES = [
     ("lclavicle", "rclavicle"),
@@ -108,6 +181,8 @@ def build_tasks_for_skeleton(robot, joints_dict, mapping_list):
     tasks = []
     task_cmu_names = []  # for each task, the CMU joint name we use
     for robot_frame, cmu_candidates in mapping_list:
+        if robot_frame not in ACTIVE_TASK_FRAMES:
+            continue
         if not robot.model.existFrame(robot_frame):
             continue
         cmu_name = None
@@ -117,7 +192,7 @@ def build_tasks_for_skeleton(robot, joints_dict, mapping_list):
                 break
         if cmu_name is None:
             continue
-        position_cost = SHOULDER_POSITION_COST if robot_frame in SHOULDER_FRAMES else POSITION_COST
+        position_cost = FRAME_POSITION_COSTS.get(robot_frame, POSITION_COST)
         tasks.append(FrameTask(robot_frame, position_cost=position_cost, orientation_cost=ORIENTATION_COST))
         task_cmu_names.append(cmu_name)
     return tasks, task_cmu_names
@@ -189,6 +264,38 @@ def _relax_unreachable_target(current_pos, target_pos, max_error):
     return current_pos + (max_error / err) * delta
 
 
+def _compute_task_target_specs(robot, tasks, joints):
+    """
+    Compute per-task anchor positions and morphology scales from robot q0 link
+    lengths and ASF bone lengths, independent of the current pose.
+    """
+    pin.forwardKinematics(robot.model, robot.data, robot.q0)
+    pin.updateFramePlacements(robot.model, robot.data)
+
+    specs = []
+    for task in tasks:
+        config = FRAME_TARGET_CONFIG.get(task.frame)
+        if config is None:
+            specs.append(None)
+            continue
+        anchor_frame_id = robot.model.getFrameId(config["robot_anchor_frame"])
+        frame_id = robot.model.getFrameId(task.frame)
+        robot_anchor = robot.data.oMf[anchor_frame_id].translation.copy()
+        robot_len = float(np.linalg.norm(robot.data.oMf[frame_id].translation - robot_anchor))
+        human_len = float(sum(joints[name].length for name in config["human_path"] if name in joints))
+        scale = 1.0
+        if robot_len > 1e-6 and human_len > 1e-6:
+            scale = float(np.clip(robot_len / human_len, TASK_SCALE_MIN, TASK_SCALE_MAX))
+        specs.append(
+            {
+                "human_anchor": config["human_anchor"],
+                "robot_anchor": robot_anchor,
+                "scale": scale,
+            }
+        )
+    return specs
+
+
 def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_names):
     """Retarget one AMC with one ASF; returns (T, nq), (T, 3) root position, (T, 1) root yaw."""
     joints = amc.parse_asf(asf_path)
@@ -200,6 +307,7 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
     # world positions, so both human and robot move in a comparable frame.
     joints["root"].set_motion(motions[0])
     init_root = joints["root"].coordinate.copy()
+    task_target_specs = _compute_task_target_specs(robot, tasks, joints)
 
     n_frames = len(motions)
     n_tasks = len(tasks)
@@ -217,9 +325,14 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
 
         for ti, cmu_name in enumerate(task_cmu_names):
             pos = joints[cmu_name].coordinate
-            # Keep IK targets in root-relative world frame; heading is applied in replay.
-            target_world_rel = _to_robot_pos_relative(pos, root_pos, init_root)
-            raw_targets[fi, ti] = target_world_rel
+            spec = task_target_specs[ti]
+            if spec is None:
+                # Base remains origin-centered; world translation is replayed separately.
+                raw_targets[fi, ti] = _to_robot_pos_relative(pos, root_pos, init_root)
+                continue
+            human_anchor = joints[spec["human_anchor"]].coordinate
+            human_local = _to_robot_pos_relative(pos, human_anchor, init_root)
+            raw_targets[fi, ti] = spec["robot_anchor"] + spec["scale"] * human_local
 
     smoothed_targets = raw_targets.copy()
     if TARGET_SMOOTH_ALPHA > 0.0:
@@ -254,10 +367,10 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
         frame_targets = np.zeros((n_tasks, 3), dtype=float)
         for ti, task in enumerate(tasks):
             target = smoothed_targets[fi, ti]
-            # if task.frame in SHOULDER_FRAMES:
-            frame_id = robot.model.getFrameId(task.frame)
-            current = robot.data.oMf[frame_id].translation
-            target = _relax_unreachable_target(current, target, SHOULDER_TARGET_MAX_ERROR)
+            if task.frame in SHOULDER_FRAMES:
+                frame_id = robot.model.getFrameId(task.frame)
+                current = robot.data.oMf[frame_id].translation
+                target = _relax_unreachable_target(current, target, SHOULDER_TARGET_MAX_ERROR)
             frame_targets[ti] = target
             task.set_target(pin.SE3(np.eye(3), target))
         q_prev = configuration.q.copy()
