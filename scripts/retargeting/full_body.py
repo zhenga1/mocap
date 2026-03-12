@@ -292,6 +292,8 @@ def _compute_task_target_specs(robot, tasks, joints):
         specs.append(
             {
                 "human_anchor": config["human_anchor"],
+                ## TODO: This is the frame that the task is anchored to.
+                "robot_anchor_frame": config["robot_anchor_frame"],
                 "robot_anchor": robot_anchor,
                 "scale": scale,
             }
@@ -314,7 +316,9 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
 
     n_frames = len(motions)
     n_tasks = len(tasks)
-    raw_targets = np.zeros((n_frames, n_tasks, 3), dtype=float)
+    # Store the human limb displacement (relative to its anchor, in robot frame) per frame.
+    # This is smoothed and then combined with the live robot anchor in the IK loop.
+    raw_human_local = np.zeros((n_frames, n_tasks, 3), dtype=float)
     root_positions = np.zeros((n_frames, 3), dtype=float)
     root_yaws = np.zeros((n_frames, 1), dtype=float)
 
@@ -327,21 +331,20 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
         root_yaws[fi, 0] = yaw
 
         for ti, cmu_name in enumerate(task_cmu_names):
-            pos = joints[cmu_name].coordinate
             spec = task_target_specs[ti]
             if spec is None:
-                # Base remains origin-centered; world translation is replayed separately.
-                raw_targets[fi, ti] = _to_robot_pos_relative(pos, root_pos, init_root)
+                # Base: target is always origin; no human_local needed.
+                raw_human_local[fi, ti] = np.zeros(3)
                 continue
+            pos = joints[cmu_name].coordinate
             human_anchor = joints[spec["human_anchor"]].coordinate
-            human_local = _to_robot_pos_relative(pos, human_anchor, init_root)
-            raw_targets[fi, ti] = spec["robot_anchor"] + spec["scale"] * human_local
+            raw_human_local[fi, ti] = _to_robot_pos_relative(pos, human_anchor, init_root)
 
-    smoothed_targets = raw_targets.copy()
+    smoothed_human_local = raw_human_local.copy()
     if TARGET_SMOOTH_ALPHA > 0.0:
         for ti in range(n_tasks):
-            smoothed_targets[:, ti, :] = _smooth_bidirectional_exponential(
-                smoothed_targets[:, ti, :],
+            smoothed_human_local[:, ti, :] = _smooth_bidirectional_exponential(
+                smoothed_human_local[:, ti, :],
                 TARGET_SMOOTH_ALPHA,
                 passes=TARGET_SMOOTH_PASSES,
             )
@@ -366,10 +369,17 @@ def retarget_motion(asf_path, amc_path, robot, configuration, tasks, task_cmu_na
         pin.forwardKinematics(robot.model, robot.data, configuration.q)
         pin.updateFramePlacements(robot.model, robot.data)
 
-        # Effective targets actually sent to the IK solver this frame
+        # Effective targets actually sent to the IK solver this frame.
+        # Robot anchor is read from live FK so it tracks joint motion across frames.
         frame_targets = np.zeros((n_tasks, 3), dtype=float)
         for ti, task in enumerate(tasks):
-            target = smoothed_targets[fi, ti]
+            spec = task_target_specs[ti]
+            if spec is None:
+                target = np.zeros(3)
+            else:
+                anchor_frame_id = robot.model.getFrameId(spec["robot_anchor_frame"])
+                current_robot_anchor = robot.data.oMf[anchor_frame_id].translation.copy()
+                target = current_robot_anchor + spec["scale"] * smoothed_human_local[fi, ti]
             if task.frame in SHOULDER_FRAMES:
                 frame_id = robot.model.getFrameId(task.frame)
                 current = robot.data.oMf[frame_id].translation
