@@ -31,9 +31,9 @@ from pink.tasks import FrameTask
 # left_right_foot_pelvis so both retargeters share exactly the same
 # CMU->robot axis conventions and scale.
 try:
-    from scripts.retargeting.left_right_foot_pelvis import get_scaled_target as _lr_get_scaled_target
+    from scripts.retargeting.left_right_foot_pelvis import get_scaled_target as _lr_get_scaled_target, SCALE as _CMU_SCALE
 except ImportError:
-    from left_right_foot_pelvis import get_scaled_target as _lr_get_scaled_target
+    from left_right_foot_pelvis import get_scaled_target as _lr_get_scaled_target, SCALE as _CMU_SCALE
 
 # Load mapping from same directory (works from project root or scripts/retargeting)
 try:
@@ -60,7 +60,7 @@ TARGET_SMOOTH_PASSES = 2
 # Root trajectory smoothing (saved and replayed as world offset).
 ROOT_SMOOTH_ALPHA = 0.25
 # Safety clamp for per-frame configuration jumps (radians for joints).
-MAX_Q_STEP = 0.08
+MAX_Q_STEP = 0.15
 # Optional post-IK q smoothing. Keep off by default to avoid over-damping.
 POST_Q_SMOOTH_ALPHA = 0.0
 YAW_SMOOTH_ALPHA = 0.2
@@ -285,7 +285,10 @@ def _compute_task_target_specs(robot, tasks, joints):
         human_len = float(sum(joints[name].length for name in config["human_path"] if name in joints))
         scale = 1.0
         if robot_len > 1e-6 and human_len > 1e-6:
-            scale = float(np.clip(robot_len / human_len, TASK_SCALE_MIN, TASK_SCALE_MAX))
+            # human_len is in raw CMU units; human_local (computed via _to_robot_pos_relative)
+            # is already scaled to robot metres by _CMU_SCALE, so divide human_len by _CMU_SCALE
+            # to make the morphology ratio dimensionally consistent.
+            scale = float(np.clip(robot_len / (human_len * _CMU_SCALE), TASK_SCALE_MIN, TASK_SCALE_MAX))
         specs.append(
             {
                 "human_anchor": config["human_anchor"],
